@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DataDog/datadog-agent/pkg/otlp/model/attributes"
 	"github.com/DataDog/datadog-agent/pkg/trace/api/apiutil"
 	"github.com/DataDog/datadog-agent/pkg/trace/config"
 	"github.com/DataDog/datadog-agent/pkg/trace/info"
@@ -357,7 +358,6 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 	if in.Events().Len() > 0 {
 		span.Meta["events"] = marshalEvents(in.Events())
 	}
-	var ctags strings.Builder // collect container tags from attributes
 	in.Attributes().Range(func(k string, v pdata.AttributeValue) bool {
 		switch v.Type() {
 		case pdata.AttributeValueTypeDouble:
@@ -378,19 +378,10 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 				span.Meta[k] = v.AsString()
 			}
 		}
-		if containerTagsAttributes[k] {
-			// attribute matching container tag found
-			if ctags.Len() > 0 {
-				ctags.WriteByte(',')
-			}
-			ctags.WriteString(conventionsMapping[k])
-			ctags.WriteByte(':')
-			ctags.WriteString(v.AsString())
-		}
 		return true
 	})
-	if ctags.Len() > 0 {
-		span.Meta[tagContainersTags] = ctags.String()
+	if ctags := attributes.ContainerTagFromAttributes(span.Meta); ctags != "" {
+		span.Meta[tagContainersTags] = ctags
 	}
 	if _, ok := span.Meta["env"]; !ok {
 		if env := span.Meta[string(semconv.AttributeDeploymentEnvironment)]; env != "" {
@@ -401,12 +392,12 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 		span.Meta["trace_state"] = string(in.TraceState())
 	}
 	if lib.Name() != "" {
-		span.Meta["otel.library.name"] = lib.Name()
+		span.Meta[semconv.OtelLibraryName] = lib.Name()
 	}
 	if lib.Version() != "" {
-		span.Meta["otel.library.version"] = lib.Version()
+		span.Meta[semconv.OtelLibraryVersion] = lib.Version()
 	}
-	span.Meta["otel.status_code"] = in.Status().Code().String()
+	span.Meta[semconv.OtelStatusCode] = in.Status().Code().String()
 	status2Error(in.Status(), in.Events(), span)
 	if span.Name == "" {
 		name := spanKindName(in.Kind())
@@ -538,74 +529,4 @@ func spanKindName(k pdata.SpanKind) string {
 		return "unknown"
 	}
 	return name
-}
-
-// conventionsMappings defines the mapping between OpenTelemetry semantic conventions
-// and Datadog Agent conventions
-var conventionsMapping = map[string]string{
-	// Datadog conventions
-	// https://docs.datadoghq.com/getting_started/tagging/unified_service_tagging/
-	semconv.AttributeDeploymentEnvironment: "env",
-	semconv.AttributeServiceName:           "service",
-	semconv.AttributeServiceVersion:        "version",
-
-	// Containers
-	semconv.AttributeContainerID:        "container_id",
-	semconv.AttributeContainerName:      "container_name",
-	semconv.AttributeContainerImageName: "image_name",
-	semconv.AttributeContainerImageTag:  "image_tag",
-
-	// Cloud conventions
-	// https://www.datadoghq.com/blog/tagging-best-practices/
-	semconv.AttributeCloudProvider:         "cloud_provider",
-	semconv.AttributeCloudRegion:           "region",
-	semconv.AttributeCloudAvailabilityZone: "zone",
-
-	// ECS conventions
-	// https://github.com/DataDog/datadog-agent/blob/e081bed/pkg/tagger/collectors/ecs_extract.go
-	semconv.AttributeAWSECSTaskFamily:   "task_family",
-	semconv.AttributeAWSECSTaskARN:      "task_arn",
-	semconv.AttributeAWSECSClusterARN:   "ecs_cluster_name",
-	semconv.AttributeAWSECSTaskRevision: "task_version",
-	semconv.AttributeAWSECSContainerARN: "ecs_container_name",
-
-	// Kubernetes resource name (via semantic conventions)
-	// https://github.com/DataDog/datadog-agent/blob/e081bed/pkg/util/kubernetes/const.go
-	semconv.AttributeK8SContainerName:   "kube_container_name",
-	semconv.AttributeK8SClusterName:     "kube_cluster_name",
-	semconv.AttributeK8SDeploymentName:  "kube_deployment",
-	semconv.AttributeK8SReplicaSetName:  "kube_replica_set",
-	semconv.AttributeK8SStatefulSetName: "kube_stateful_set",
-	semconv.AttributeK8SDaemonSetName:   "kube_daemon_set",
-	semconv.AttributeK8SJobName:         "kube_job",
-	semconv.AttributeK8SCronJobName:     "kube_cronjob",
-	semconv.AttributeK8SNamespaceName:   "kube_namespace",
-	semconv.AttributeK8SPodName:         "pod_name",
-}
-
-// containerTagsAttributes lists attribute names that can be converted to Datadog tags
-// using the conventionsMapping map.
-var containerTagsAttributes = map[string]bool{
-	semconv.AttributeContainerID:           true,
-	semconv.AttributeContainerName:         true,
-	semconv.AttributeContainerImageName:    true,
-	semconv.AttributeContainerImageTag:     true,
-	semconv.AttributeK8SContainerName:      true,
-	semconv.AttributeK8SClusterName:        true,
-	semconv.AttributeK8SDeploymentName:     true,
-	semconv.AttributeK8SReplicaSetName:     true,
-	semconv.AttributeK8SStatefulSetName:    true,
-	semconv.AttributeK8SDaemonSetName:      true,
-	semconv.AttributeK8SJobName:            true,
-	semconv.AttributeK8SCronJobName:        true,
-	semconv.AttributeK8SNamespaceName:      true,
-	semconv.AttributeK8SPodName:            true,
-	semconv.AttributeCloudProvider:         true,
-	semconv.AttributeCloudRegion:           true,
-	semconv.AttributeCloudAvailabilityZone: true,
-	semconv.AttributeAWSECSTaskFamily:      true,
-	semconv.AttributeAWSECSTaskARN:         true,
-	semconv.AttributeAWSECSClusterARN:      true,
-	semconv.AttributeAWSECSTaskRevision:    true,
-	semconv.AttributeAWSECSContainerARN:    true,
 }
