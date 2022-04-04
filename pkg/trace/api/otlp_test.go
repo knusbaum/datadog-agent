@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/model/pdata"
+	semconv "go.opentelemetry.io/collector/model/semconv/v1.6.1"
 )
 
 var otlpTestSpanConfig = &testutil.OTLPSpan{
@@ -590,6 +591,57 @@ func TestOTLPConvertSpan(t *testing.T) {
 				},
 				Type: "web",
 			},
+		}, {
+			rattr: map[string]string{
+				"env": "staging",
+			},
+			libname: "ddtracer",
+			libver:  "v2",
+			in: testutil.NewOTLPSpan(&testutil.OTLPSpan{
+				Name:  "/path",
+				Start: now,
+				End:   now + 200000000,
+				Attributes: map[string]interface{}{
+					"service.name":                    "mongo",
+					"operation.name":                  "READ",
+					"resource.name":                   "/path",
+					"span.type":                       "db",
+					"name":                            "john",
+					semconv.AttributeContainerID:      "cid",
+					semconv.AttributeK8SContainerName: "k8s-container",
+					"http.method":                     "GET",
+					"http.route":                      "/path",
+					"approx":                          1.2,
+					"count":                           2,
+				},
+			}),
+			out: &pb.Span{
+				Service:  "mongo",
+				Name:     "READ",
+				Resource: "/path",
+				TraceID:  2594128270069917171,
+				SpanID:   2594128270069917171,
+				ParentID: 0,
+				Start:    int64(now),
+				Duration: 200000000,
+				Meta: map[string]string{
+					"env":                             "staging",
+					"_dd.tags.container":              "container_id:cid,kube_container_name:k8s-container",
+					semconv.AttributeContainerID:      "cid",
+					semconv.AttributeK8SContainerName: "k8s-container",
+					"http.method":                     "GET",
+					"http.route":                      "/path",
+					"instrumentation_library.name":    "ddtracer",
+					"instrumentation_library.version": "v2",
+					"name":                            "john",
+					"otel.trace_id":                   "72df520af2bde7a5240031ead750e5f3",
+				},
+				Metrics: map[string]float64{
+					"approx": 1.2,
+					"count":  2,
+				},
+				Type: "db",
+			},
 		},
 	} {
 		lib := pdata.NewInstrumentationLibrary()
@@ -599,21 +651,31 @@ func TestOTLPConvertSpan(t *testing.T) {
 		want := tt.out
 		got := convertSpan(tt.rattr, lib, tt.in)
 		if len(want.Meta) != len(got.Meta) {
-			t.Fatalf("(%d) Meta count mismatch", i)
+			t.Fatalf("(%d) Meta count mismatch:\n%#v", i, got.Meta)
 		}
 		for k, v := range want.Meta {
-			if k != "events" {
+			switch k {
+			case "events":
+				// events contain maps with no guaranteed order of
+				// traversal; best to unpack to compare
+				var gote, wante []testutil.OTLPSpanEvent
+				if err := json.Unmarshal([]byte(v), &wante); err != nil {
+					t.Fatalf("(%d) Error unmarshalling: %v", i, err)
+				}
+				if err := json.Unmarshal([]byte(got.Meta[k]), &gote); err != nil {
+					t.Fatalf("(%d) Error unmarshalling: %v", i, err)
+				}
+				assert.Equal(wante, gote)
+			case "_dd.container_tags":
+				// order not guaranteed, so we need to unpack and sort to compare
+				gott := strings.Split(got.Meta[tagContainersTags], ",")
+				wantt := strings.Split(want.Meta[tagContainersTags], ",")
+				sort.Strings(gott)
+				sort.Strings(wantt)
+				assert.Equal(wantt, gott)
+			default:
 				assert.Equal(v, got.Meta[k], fmt.Sprintf("(%d) Meta %v:%v", i, k, v))
-				continue
 			}
-			var gote, wante []testutil.OTLPSpanEvent
-			if err := json.Unmarshal([]byte(v), &wante); err != nil {
-				t.Fatalf("(%d) Error unmarshalling: %v", i, err)
-			}
-			if err := json.Unmarshal([]byte(got.Meta[k]), &gote); err != nil {
-				t.Fatalf("(%d) Error unmarshalling: %v", i, err)
-			}
-			assert.Equal(wante, gote)
 		}
 		if len(want.Metrics) != len(got.Metrics) {
 			t.Fatalf("(%d) Metrics count mismatch:\n\n%v\n\n%v", i, want.Metrics, got.Metrics)

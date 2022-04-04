@@ -27,6 +27,7 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/trace/metrics/timing"
 	"github.com/DataDog/datadog-agent/pkg/trace/pb"
 	"github.com/DataDog/datadog-agent/pkg/trace/sampler"
+	"github.com/DataDog/datadog-agent/pkg/trace/traceutil"
 
 	"go.opentelemetry.io/collector/model/otlpgrpc"
 	"go.opentelemetry.io/collector/model/pdata"
@@ -253,8 +254,10 @@ func (o *OTLPReceiver) processRequest(protocol string, header http.Header, in ot
 				Spans:    spans,
 			})
 		}
+		env := rattr[string(semconv.AttributeDeploymentEnvironment)]
 		p.TracerPayload = &pb.TracerPayload{
 			Chunks:          traceChunks,
+			Env:             traceutil.NormalizeTag(env),
 			ContainerID:     fastHeaderGet(header, headerContainerID),
 			LanguageName:    tagstats.Lang,
 			LanguageVersion: tagstats.LangVersion,
@@ -331,26 +334,17 @@ func marshalEvents(events pdata.SpanEventSlice) string {
 // convertSpan converts the span in to a Datadog span, and uses the rattr resource tags and the lib instrumentation
 // library attributes to further augment it.
 func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in pdata.Span) *pb.Span {
-	name := spanKindName(in.Kind())
-	if lib.Name() != "" {
-		name = lib.Name() + "." + name
-	} else {
-		name = "opentelemetry." + name
-	}
 	traceID := in.TraceID().Bytes()
 	meta := make(map[string]string, len(rattr))
 	for k, v := range rattr {
 		meta[k] = v
 	}
 	span := &pb.Span{
-		Name:     name,
 		TraceID:  traceIDToUint64(traceID),
 		SpanID:   spanIDToUint64(in.SpanID().Bytes()),
 		ParentID: spanIDToUint64(in.ParentSpanID().Bytes()),
 		Start:    int64(in.StartTimestamp()),
 		Duration: int64(in.EndTimestamp()) - int64(in.StartTimestamp()),
-		Service:  rattr[string(semconv.AttributeServiceName)],
-		Resource: in.Name(),
 		Meta:     meta,
 		Metrics:  map[string]float64{},
 	}
@@ -363,6 +357,7 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 	if in.Events().Len() > 0 {
 		span.Meta["events"] = marshalEvents(in.Events())
 	}
+	var ctags strings.Builder // collect container tags from attributes
 	in.Attributes().Range(func(k string, v pdata.AttributeValue) bool {
 		switch v.Type() {
 		case pdata.AttributeValueTypeDouble:
@@ -370,32 +365,77 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 		case pdata.AttributeValueTypeInt:
 			span.Metrics[k] = float64(v.IntVal())
 		default:
-			span.Meta[k] = v.AsString()
+			switch k {
+			case "operation.name":
+				span.Name = v.AsString()
+			case "service.name":
+				span.Service = v.AsString()
+			case "resource.name":
+				span.Resource = v.AsString()
+			case "span.type":
+				span.Type = v.AsString()
+			default:
+				span.Meta[k] = v.AsString()
+			}
+		}
+		if containerTagsAttributes[k] {
+			// attribute matching container tag found
+			if ctags.Len() > 0 {
+				ctags.WriteByte(',')
+			}
+			ctags.WriteString(conventionsMapping[k])
+			ctags.WriteByte(':')
+			ctags.WriteString(v.AsString())
 		}
 		return true
 	})
+	if ctags.Len() > 0 {
+		span.Meta[tagContainersTags] = ctags.String()
+	}
 	if _, ok := span.Meta["env"]; !ok {
 		if env := span.Meta[string(semconv.AttributeDeploymentEnvironment)]; env != "" {
-			span.Meta["env"] = env
+			span.Meta["env"] = traceutil.NormalizeTag(env)
 		}
 	}
 	if in.TraceState() != pdata.TraceStateEmpty {
 		span.Meta["trace_state"] = string(in.TraceState())
 	}
 	if lib.Name() != "" {
-		span.Meta["instrumentation_library.name"] = lib.Name()
+		span.Meta["otel.library.name"] = lib.Name()
 	}
 	if lib.Version() != "" {
-		span.Meta["instrumentation_library.version"] = lib.Version()
+		span.Meta["otel.library.version"] = lib.Version()
 	}
-	if svc := span.Meta[string(semconv.AttributePeerService)]; svc != "" {
-		span.Service = svc
-	}
-	if r := resourceFromTags(span.Meta); r != "" {
-		span.Resource = r
-	}
-	span.Type = spanKind2Type(in.Kind(), span)
+	span.Meta["otel.status_code"] = in.Status().Code().String()
 	status2Error(in.Status(), in.Events(), span)
+	if span.Name == "" {
+		name := spanKindName(in.Kind())
+		if lib.Name() != "" {
+			name = lib.Name() + "." + name
+		} else {
+			name = "opentelemetry." + name
+		}
+		span.Name = name
+	}
+	if span.Service == "" {
+		if svc := rattr[string(semconv.AttributeServiceName)]; svc != "" {
+			span.Service = svc
+		} else if svc := span.Meta[string(semconv.AttributePeerService)]; svc != "" {
+			span.Service = svc
+		} else {
+			span.Service = "OTLPResourceNoServiceName"
+		}
+	}
+	if span.Resource == "" {
+		if r := resourceFromTags(span.Meta); r != "" {
+			span.Resource = r
+		} else {
+			span.Resource = in.Name()
+		}
+	}
+	if span.Type == "" {
+		span.Type = spanKind2Type(in.Kind(), span)
+	}
 	return span
 }
 
@@ -498,4 +538,74 @@ func spanKindName(k pdata.SpanKind) string {
 		return "unknown"
 	}
 	return name
+}
+
+// conventionsMappings defines the mapping between OpenTelemetry semantic conventions
+// and Datadog Agent conventions
+var conventionsMapping = map[string]string{
+	// Datadog conventions
+	// https://docs.datadoghq.com/getting_started/tagging/unified_service_tagging/
+	semconv.AttributeDeploymentEnvironment: "env",
+	semconv.AttributeServiceName:           "service",
+	semconv.AttributeServiceVersion:        "version",
+
+	// Containers
+	semconv.AttributeContainerID:        "container_id",
+	semconv.AttributeContainerName:      "container_name",
+	semconv.AttributeContainerImageName: "image_name",
+	semconv.AttributeContainerImageTag:  "image_tag",
+
+	// Cloud conventions
+	// https://www.datadoghq.com/blog/tagging-best-practices/
+	semconv.AttributeCloudProvider:         "cloud_provider",
+	semconv.AttributeCloudRegion:           "region",
+	semconv.AttributeCloudAvailabilityZone: "zone",
+
+	// ECS conventions
+	// https://github.com/DataDog/datadog-agent/blob/e081bed/pkg/tagger/collectors/ecs_extract.go
+	semconv.AttributeAWSECSTaskFamily:   "task_family",
+	semconv.AttributeAWSECSTaskARN:      "task_arn",
+	semconv.AttributeAWSECSClusterARN:   "ecs_cluster_name",
+	semconv.AttributeAWSECSTaskRevision: "task_version",
+	semconv.AttributeAWSECSContainerARN: "ecs_container_name",
+
+	// Kubernetes resource name (via semantic conventions)
+	// https://github.com/DataDog/datadog-agent/blob/e081bed/pkg/util/kubernetes/const.go
+	semconv.AttributeK8SContainerName:   "kube_container_name",
+	semconv.AttributeK8SClusterName:     "kube_cluster_name",
+	semconv.AttributeK8SDeploymentName:  "kube_deployment",
+	semconv.AttributeK8SReplicaSetName:  "kube_replica_set",
+	semconv.AttributeK8SStatefulSetName: "kube_stateful_set",
+	semconv.AttributeK8SDaemonSetName:   "kube_daemon_set",
+	semconv.AttributeK8SJobName:         "kube_job",
+	semconv.AttributeK8SCronJobName:     "kube_cronjob",
+	semconv.AttributeK8SNamespaceName:   "kube_namespace",
+	semconv.AttributeK8SPodName:         "pod_name",
+}
+
+// containerTagsAttributes lists attribute names that can be converted to Datadog tags
+// using the conventionsMapping map.
+var containerTagsAttributes = map[string]bool{
+	semconv.AttributeContainerID:           true,
+	semconv.AttributeContainerName:         true,
+	semconv.AttributeContainerImageName:    true,
+	semconv.AttributeContainerImageTag:     true,
+	semconv.AttributeK8SContainerName:      true,
+	semconv.AttributeK8SClusterName:        true,
+	semconv.AttributeK8SDeploymentName:     true,
+	semconv.AttributeK8SReplicaSetName:     true,
+	semconv.AttributeK8SStatefulSetName:    true,
+	semconv.AttributeK8SDaemonSetName:      true,
+	semconv.AttributeK8SJobName:            true,
+	semconv.AttributeK8SCronJobName:        true,
+	semconv.AttributeK8SNamespaceName:      true,
+	semconv.AttributeK8SPodName:            true,
+	semconv.AttributeCloudProvider:         true,
+	semconv.AttributeCloudRegion:           true,
+	semconv.AttributeCloudAvailabilityZone: true,
+	semconv.AttributeAWSECSTaskFamily:      true,
+	semconv.AttributeAWSECSTaskARN:         true,
+	semconv.AttributeAWSECSClusterARN:      true,
+	semconv.AttributeAWSECSTaskRevision:    true,
+	semconv.AttributeAWSECSContainerARN:    true,
 }
