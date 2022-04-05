@@ -412,7 +412,7 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 		}
 	}
 	if in.TraceState() != pdata.TraceStateEmpty {
-		span.Meta["trace_state"] = string(in.TraceState())
+		span.Meta["w3c.tracestate"] = string(in.TraceState())
 	}
 	if lib.Name() != "" {
 		span.Meta[semconv.OtelLibraryName] = lib.Name()
@@ -423,6 +423,7 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 	span.Meta[semconv.OtelStatusCode] = in.Status().Code().String()
 	status2Error(in.Status(), in.Events(), span)
 	if span.Name == "" {
+		// TODO: span name (SpanNameAsResourceName, span.Name(), etc). translate_traces.go:307
 		name := spanKindName(in.Kind())
 		if lib.Name() != "" {
 			name = lib.Name() + "." + name
@@ -432,9 +433,9 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 		span.Name = name
 	}
 	if span.Service == "" {
-		if svc := rattr[string(semconv.AttributeServiceName)]; svc != "" {
+		if svc := span.Meta[string(semconv.AttributePeerService)]; svc != "" {
 			span.Service = svc
-		} else if svc := span.Meta[string(semconv.AttributePeerService)]; svc != "" {
+		} else if svc := rattr[string(semconv.AttributeServiceName)]; svc != "" {
 			span.Service = svc
 		} else {
 			span.Service = "OTLPResourceNoServiceName"
@@ -458,6 +459,7 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 func resourceFromTags(meta map[string]string) string {
 	var r string
 	if m := meta[string(semconv.AttributeHTTPMethod)]; m != "" {
+		// use the HTTP method + route (if available)
 		r = m
 		if route := meta[string(semconv.AttributeHTTPRoute)]; route != "" {
 			r += " " + route
@@ -465,9 +467,17 @@ func resourceFromTags(meta map[string]string) string {
 			r += " " + route
 		}
 	} else if m := meta[string(semconv.AttributeMessagingOperation)]; m != "" {
+		// use the messaging operation
 		r = m
 		if dest := meta[string(semconv.AttributeMessagingDestination)]; dest != "" {
 			r += " " + dest
+		}
+	} else if m := meta[string(semconv.AttributeRPCMethod)]; m != "" {
+		// use the RPC method
+		r = m
+		if svc := meta[string(semconv.AttributeRPCService)]; svc != "" {
+			// ...and service if availabl
+			r += " " + svc
 		}
 	}
 	return r
@@ -498,8 +508,17 @@ func status2Error(status pdata.SpanStatus, events pdata.SpanEventSlice, span *pb
 		})
 	}
 	if _, ok := span.Meta["error.msg"]; !ok {
+		// no error message was extracted, find alternatives
 		if status.Message() != "" {
+			// use the status message
 			span.Meta["error.msg"] = status.Message()
+		} else if httpcode, ok := span.Meta["http.status_code"]; ok {
+			// we have status code that we can use as details
+			if httptext, ok := span.Meta["http.status_text"]; ok {
+				span.Meta["error.msg"] = fmt.Sprintf("%s %s", httpcode, httptext)
+			} else {
+				span.Meta["error.msg"] = httpcode
+			}
 		}
 	}
 }
