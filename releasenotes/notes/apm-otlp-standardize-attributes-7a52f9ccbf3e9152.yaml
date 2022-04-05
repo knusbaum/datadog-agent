@@ -8,4 +8,4 @@
 ---
 fixes:
   - |
-    APM: OTLP: this change ensures that the ingest now standardizes certain attribute keys to their correct Datadog tag counter parts, such as: container tags, "operation.name", "service.name", etc.
+    APM OTLP: This change ensures that the ingest now standardizes certain attribute keys to their correct Datadog tag counter parts, such as: container tags, "operation.name", "service.name", etc.
