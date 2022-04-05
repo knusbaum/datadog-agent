@@ -244,16 +244,13 @@ func (o *OTLPReceiver) ProcessResourceSpans(rspans pdata.ResourceSpans, header h
 			if tracesByID[traceID] == nil {
 				tracesByID[traceID] = pb.Trace{}
 			}
-			ddspan := convertSpan(rattr, lib, span)
+			ddspan := o.convertSpan(rattr, lib, span)
 			if hostname == "" {
 				// if we didn't find a hostname at the resource level
 				if v := ddspan.Meta["_dd.hostname"]; v != "" {
 					// try and see if the span has a hostname set
 					hostname = v
 				}
-			}
-			if v, ok := o.conf.OTLPReceiver.SpanNameRemappings[ddspan.Name]; ok {
-				ddspan.Name = v
 			}
 			tracesByID[traceID] = append(tracesByID[traceID], ddspan)
 		}
@@ -357,7 +354,7 @@ func marshalEvents(events pdata.SpanEventSlice) string {
 
 // convertSpan converts the span in to a Datadog span, and uses the rattr resource tags and the lib instrumentation
 // library attributes to further augment it.
-func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in pdata.Span) *pb.Span {
+func (o *OTLPReceiver) convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in pdata.Span) *pb.Span {
 	traceID := in.TraceID().Bytes()
 	meta := make(map[string]string, len(rattr))
 	for k, v := range rattr {
@@ -421,14 +418,22 @@ func convertSpan(rattr map[string]string, lib pdata.InstrumentationLibrary, in p
 		span.Meta[semconv.OtelLibraryVersion] = lib.Version()
 	}
 	span.Meta[semconv.OtelStatusCode] = in.Status().Code().String()
+	if msg := in.Status().Message(); msg != "" {
+		span.Meta[semconv.OtelStatusDescription] = msg
+	}
 	status2Error(in.Status(), in.Events(), span)
 	if span.Name == "" {
-		// TODO: span name (SpanNameAsResourceName, span.Name(), etc). translate_traces.go:307
-		name := spanKindName(in.Kind())
-		if lib.Name() != "" {
-			name = lib.Name() + "." + name
-		} else {
-			name = "opentelemetry." + name
+		name := in.Name()
+		if !o.conf.OTLPReceiver.SpanNameAsResourceName {
+			name = spanKindName(in.Kind())
+			if lib.Name() != "" {
+				name = lib.Name() + "." + name
+			} else {
+				name = "opentelemetry." + name
+			}
+		}
+		if v, ok := o.conf.OTLPReceiver.SpanNameRemappings[name]; ok {
+			name = v
 		}
 		span.Name = name
 	}
