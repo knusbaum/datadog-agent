@@ -81,6 +81,75 @@ var otlpTestTracesRequest = testutil.NewOTLPTracesRequest([]testutil.OTLPResourc
 	},
 })
 
+func TestOTLPNameRemapping(t *testing.T) {
+	cfg := config.New()
+	cfg.OTLPReceiver.SpanNameRemappings = map[string]string{"libname.unspecified": "new"}
+	out := make(chan *Payload, 1)
+	rcv := NewOTLPReceiver(out, cfg)
+	rcv.ProcessResourceSpans(testutil.NewOTLPTracesRequest([]testutil.OTLPResourceSpan{
+		{
+			LibName:    "libname",
+			LibVersion: "1.2",
+			Attributes: map[string]interface{}{},
+			Spans: []*testutil.OTLPSpan{
+				{Name: "asd"},
+			},
+		},
+	}).Traces().ResourceSpans().At(0), http.Header{}, "")
+	timeout := time.After(500 * time.Millisecond)
+	select {
+	case <-timeout:
+		t.Fatal("timed out")
+	case p := <-out:
+		assert.Equal(t, "new", p.TracerPayload.Chunks[0].Spans[0].Name)
+	}
+}
+
+func TestOTLPHostname(t *testing.T) {
+	for _, tt := range []struct {
+		config, resource, span string
+		out                    string
+	}{
+		{
+			config:   "config-hostname",
+			resource: "resource-hostname",
+			span:     "span-hostname",
+			out:      "resource-hostname",
+		},
+		{
+			config: "config-hostname",
+			out:    "config-hostname",
+		},
+		{
+			config: "config-hostname",
+			span:   "span-hostname",
+			out:    "span-hostname",
+		},
+	} {
+		cfg := config.New()
+		cfg.Hostname = tt.config
+		out := make(chan *Payload, 1)
+		rcv := NewOTLPReceiver(out, cfg)
+		rcv.ProcessResourceSpans(testutil.NewOTLPTracesRequest([]testutil.OTLPResourceSpan{
+			{
+				LibName:    "a",
+				LibVersion: "1.2",
+				Attributes: map[string]interface{}{"datadog.host.name": tt.resource},
+				Spans: []*testutil.OTLPSpan{
+					{Attributes: map[string]interface{}{"_dd.hostname": tt.span}},
+				},
+			},
+		}).Traces().ResourceSpans().At(0), http.Header{}, "")
+		timeout := time.After(500 * time.Millisecond)
+		select {
+		case <-timeout:
+			t.Fatal("timed out")
+		case p := <-out:
+			assert.Equal(t, tt.out, p.TracerPayload.Hostname)
+		}
+	}
+}
+
 func TestOTLPReceiver(t *testing.T) {
 	t.Run("New", func(t *testing.T) {
 		cfg := config.New()

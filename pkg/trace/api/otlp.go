@@ -204,73 +204,96 @@ func fastHeaderGet(h http.Header, canonicalKey string) string {
 func (o *OTLPReceiver) processRequest(protocol string, header http.Header, in otlpgrpc.TracesRequest) {
 	for i := 0; i < in.Traces().ResourceSpans().Len(); i++ {
 		rspans := in.Traces().ResourceSpans().At(i)
-		// each rspans is coming from a different resource and should be considered
-		// a separate payload; typically there is only one item in this slice
-		attr := rspans.Resource().Attributes()
-		rattr := make(map[string]string, attr.Len())
-		attr.Range(func(k string, v pdata.AttributeValue) bool {
-			rattr[k] = v.AsString()
-			return true
-		})
-		lang := rattr[string(semconv.AttributeTelemetrySDKLanguage)]
-		if lang == "" {
-			lang = fastHeaderGet(header, headerLang)
-		}
-		tagstats := &info.TagStats{
-			Tags: info.Tags{
-				Lang:            lang,
-				LangVersion:     fastHeaderGet(header, headerLangVersion),
-				Interpreter:     fastHeaderGet(header, headerLangInterpreter),
-				LangVendor:      fastHeaderGet(header, headerLangInterpreterVendor),
-				TracerVersion:   fmt.Sprintf("otlp-%s", rattr[string(semconv.AttributeTelemetrySDKVersion)]),
-				EndpointVersion: fmt.Sprintf("opentelemetry_%s_v1", protocol),
-			},
-			Stats: info.NewStats(),
-		}
-		tracesByID := make(map[uint64]pb.Trace)
-		for i := 0; i < rspans.InstrumentationLibrarySpans().Len(); i++ {
-			libspans := rspans.InstrumentationLibrarySpans().At(i)
-			lib := libspans.InstrumentationLibrary()
-			for i := 0; i < libspans.Spans().Len(); i++ {
-				span := libspans.Spans().At(i)
-				traceID := traceIDToUint64(span.TraceID().Bytes())
-				if tracesByID[traceID] == nil {
-					tracesByID[traceID] = pb.Trace{}
-				}
-				tracesByID[traceID] = append(tracesByID[traceID], convertSpan(rattr, lib, span))
-			}
-		}
-		tags := tagstats.AsTags()
-		metrics.Count("datadog.trace_agent.otlp.spans", int64(rspans.InstrumentationLibrarySpans().Len()), tags, 1)
-		metrics.Count("datadog.trace_agent.otlp.traces", int64(len(tracesByID)), tags, 1)
-		traceChunks := make([]*pb.TraceChunk, 0, len(tracesByID))
-		p := Payload{
-			Source: tagstats,
-		}
-		for _, spans := range tracesByID {
-			traceChunks = append(traceChunks, &pb.TraceChunk{
-				// auto-keep all incoming traces; it was already chosen as a keeper on
-				// the client side.
-				Priority: int32(sampler.PriorityAutoKeep),
-				Spans:    spans,
-			})
-		}
-		env := rattr[string(semconv.AttributeDeploymentEnvironment)]
-		p.TracerPayload = &pb.TracerPayload{
-			Chunks:          traceChunks,
-			Env:             traceutil.NormalizeTag(env),
-			ContainerID:     fastHeaderGet(header, headerContainerID),
-			LanguageName:    tagstats.Lang,
-			LanguageVersion: tagstats.LangVersion,
-			TracerVersion:   tagstats.TracerVersion,
-		}
-		if ctags := getContainerTags(o.conf.ContainerTags, p.TracerPayload.ContainerID); ctags != "" {
-			p.TracerPayload.Tags = map[string]string{
-				tagContainersTags: ctags,
-			}
-		}
-		o.out <- &p
+		o.ProcessResourceSpans(rspans, header, protocol)
 	}
+}
+
+// ProcessResourceSpans processes the given rspans and sends them to writer.
+func (o *OTLPReceiver) ProcessResourceSpans(rspans pdata.ResourceSpans, header http.Header, protocol string) {
+	// each rspans is coming from a different resource and should be considered
+	// a separate payload; typically there is only one item in this slice
+	attr := rspans.Resource().Attributes()
+	hostname, _ := attributes.HostnameFromAttributes(attr)
+	rattr := make(map[string]string, attr.Len())
+	attr.Range(func(k string, v pdata.AttributeValue) bool {
+		rattr[k] = v.AsString()
+		return true
+	})
+	lang := rattr[string(semconv.AttributeTelemetrySDKLanguage)]
+	if lang == "" {
+		lang = fastHeaderGet(header, headerLang)
+	}
+	tagstats := &info.TagStats{
+		Tags: info.Tags{
+			Lang:            lang,
+			LangVersion:     fastHeaderGet(header, headerLangVersion),
+			Interpreter:     fastHeaderGet(header, headerLangInterpreter),
+			LangVendor:      fastHeaderGet(header, headerLangInterpreterVendor),
+			TracerVersion:   fmt.Sprintf("otlp-%s", rattr[string(semconv.AttributeTelemetrySDKVersion)]),
+			EndpointVersion: fmt.Sprintf("opentelemetry_%s_v1", protocol),
+		},
+		Stats: info.NewStats(),
+	}
+	tracesByID := make(map[uint64]pb.Trace)
+	for i := 0; i < rspans.InstrumentationLibrarySpans().Len(); i++ {
+		libspans := rspans.InstrumentationLibrarySpans().At(i)
+		lib := libspans.InstrumentationLibrary()
+		for i := 0; i < libspans.Spans().Len(); i++ {
+			span := libspans.Spans().At(i)
+			traceID := traceIDToUint64(span.TraceID().Bytes())
+			if tracesByID[traceID] == nil {
+				tracesByID[traceID] = pb.Trace{}
+			}
+			ddspan := convertSpan(rattr, lib, span)
+			if hostname == "" {
+				// if we didn't find a hostname at the resource level
+				if v := ddspan.Meta["_dd.hostname"]; v != "" {
+					// try and see if the span has a hostname set
+					hostname = v
+				}
+			}
+			if v, ok := o.conf.OTLPReceiver.SpanNameRemappings[ddspan.Name]; ok {
+				ddspan.Name = v
+			}
+			tracesByID[traceID] = append(tracesByID[traceID], ddspan)
+		}
+	}
+	tags := tagstats.AsTags()
+	metrics.Count("datadog.trace_agent.otlp.spans", int64(rspans.InstrumentationLibrarySpans().Len()), tags, 1)
+	metrics.Count("datadog.trace_agent.otlp.traces", int64(len(tracesByID)), tags, 1)
+	traceChunks := make([]*pb.TraceChunk, 0, len(tracesByID))
+	p := Payload{
+		Source: tagstats,
+	}
+	for _, spans := range tracesByID {
+		traceChunks = append(traceChunks, &pb.TraceChunk{
+			// auto-keep all incoming traces; it was already chosen as a keeper on
+			// the client side.
+			Priority: int32(sampler.PriorityAutoKeep),
+			Spans:    spans,
+		})
+	}
+	env := rattr[string(semconv.AttributeDeploymentEnvironment)]
+	if hostname == "" {
+		// if we didn't find a hostname anywhere: not at the resource level,
+		// not at the span level, use the config hostname
+		hostname = o.conf.Hostname
+	}
+	p.TracerPayload = &pb.TracerPayload{
+		Hostname:        hostname,
+		Chunks:          traceChunks,
+		Env:             traceutil.NormalizeTag(env),
+		ContainerID:     fastHeaderGet(header, headerContainerID),
+		LanguageName:    tagstats.Lang,
+		LanguageVersion: tagstats.LangVersion,
+		TracerVersion:   tagstats.TracerVersion,
+	}
+	if ctags := getContainerTags(o.conf.ContainerTags, p.TracerPayload.ContainerID); ctags != "" {
+		p.TracerPayload.Tags = map[string]string{
+			tagContainersTags: ctags,
+		}
+	}
+	o.out <- &p
 }
 
 // marshalEvents marshals events into JSON.
