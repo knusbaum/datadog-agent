@@ -204,12 +204,21 @@ func fastHeaderGet(h http.Header, canonicalKey string) string {
 func (o *OTLPReceiver) processRequest(protocol string, header http.Header, in otlpgrpc.TracesRequest) {
 	for i := 0; i < in.Traces().ResourceSpans().Len(); i++ {
 		rspans := in.Traces().ResourceSpans().At(i)
-		o.ProcessResourceSpans(rspans, header, protocol)
+		o.ReceiveResourceSpans(rspans, header, protocol)
 	}
 }
 
-// ProcessResourceSpans processes the given rspans and sends them to writer.
-func (o *OTLPReceiver) ProcessResourceSpans(rspans pdata.ResourceSpans, header http.Header, protocol string) {
+// OTLPIngestSummary returns a summary of the received resource spans.
+type OTLPIngestSummary struct {
+	// Hostname indicates the hostname of the passed resource spans.
+	Hostname string
+	// Tags returns a set of Datadog-specific tags which are relevant for identifying
+	// the source of the passed resource spans.
+	Tags []string
+}
+
+// ReceiveResourceSpans processes the given rspans and sends them to writer.
+func (o *OTLPReceiver) ReceiveResourceSpans(rspans pdata.ResourceSpans, header http.Header, protocol string) OTLPIngestSummary {
 	// each rspans is coming from a different resource and should be considered
 	// a separate payload; typically there is only one item in this slice
 	attr := rspans.Resource().Attributes()
@@ -291,6 +300,10 @@ func (o *OTLPReceiver) ProcessResourceSpans(rspans pdata.ResourceSpans, header h
 		}
 	}
 	o.out <- &p
+	return OTLPIngestSummary{
+		Hostname: hostname,
+		Tags:     attributes.RunningTagsFromAttributes(attr),
+	}
 }
 
 // marshalEvents marshals events into JSON.

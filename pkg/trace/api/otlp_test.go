@@ -86,7 +86,7 @@ func TestOTLPNameRemapping(t *testing.T) {
 	cfg.OTLPReceiver.SpanNameRemappings = map[string]string{"libname.unspecified": "new"}
 	out := make(chan *Payload, 1)
 	rcv := NewOTLPReceiver(out, cfg)
-	rcv.ProcessResourceSpans(testutil.NewOTLPTracesRequest([]testutil.OTLPResourceSpan{
+	rcv.ReceiveResourceSpans(testutil.NewOTLPTracesRequest([]testutil.OTLPResourceSpan{
 		{
 			LibName:    "libname",
 			LibVersion: "1.2",
@@ -130,7 +130,7 @@ func TestOTLPHostname(t *testing.T) {
 		cfg.Hostname = tt.config
 		out := make(chan *Payload, 1)
 		rcv := NewOTLPReceiver(out, cfg)
-		rcv.ProcessResourceSpans(testutil.NewOTLPTracesRequest([]testutil.OTLPResourceSpan{
+		rcv.ReceiveResourceSpans(testutil.NewOTLPTracesRequest([]testutil.OTLPResourceSpan{
 			{
 				LibName:    "a",
 				LibVersion: "1.2",
