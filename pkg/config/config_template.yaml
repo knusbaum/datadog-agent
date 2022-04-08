@@ -3246,3 +3246,18 @@ api_key:
     ## Whether to ingest traces through the OTLP endpoint. Set to false to disable OTLP traces ingest.
     #
     # enabled: true
+
+    ## @param span_name_as_resource_name - boolean - optional - default: false
+    ## @env DD_OTLP_CONFIG_SPAN_NAME_AS_RESOURCE_NAME - boolean - optional - default: false
+    ## If set to true the OpenTelemetry span name will used in the Datadog resource name.
+    ## If set to false the resource name will be filled with the instrumentation library name + span kind.
+    #
+    # span_name_as_resource_name: false
+
+    ## @param span_name_remappings - map - optional
+    ## @env DD_OTLP_CONFIG_SPAN_NAME_REMAPPINGS - boolean - optional
+    ## If set to true the OpenTelemetry span name will used in the Datadog resource name.
+    ## If set to false the resource name will be filled with the instrumentation library name + span kind.
+    #
+    # span_name_remappings:
+    #   <OLD_NAME>: <NEW_NAME>
