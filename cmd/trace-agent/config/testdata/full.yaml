@@ -17,6 +17,8 @@ otlp_config:
     span_name_remappings:
       a: b
       c: d
+      "with.dots": "in.side"
+      "and:colons": "in:values"
     span_name_as_resource_name: true
 apm_config:
   enabled: false

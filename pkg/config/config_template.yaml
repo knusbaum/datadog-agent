@@ -3256,8 +3256,12 @@ api_key:
 
     ## @param span_name_remappings - map - optional
     ## @env DD_OTLP_CONFIG_SPAN_NAME_REMAPPINGS - boolean - optional
-    ## If set to true the OpenTelemetry span name will used in the Datadog resource name.
-    ## If set to false the resource name will be filled with the instrumentation library name + span kind.
+    ## Defines a map of span names and preferred names to map to. This can be used to automatically map Datadog Span
+    ## Operation Names to an updated value.
+    ## span_name_remappings:
+    ##   "io.opentelemetry.javaagent.spring.client": "spring.client"
+    ##   "instrumentation:express.server": "express"
+    ##   "go.opentelemetry.io_contrib_instrumentation_net_http_otelhttp.client": "http.client"
     #
     # span_name_remappings:
     #   <OLD_NAME>: <NEW_NAME>

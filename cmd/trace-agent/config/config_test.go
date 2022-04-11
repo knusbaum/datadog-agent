@@ -425,7 +425,7 @@ func TestFullYamlConfig(t *testing.T) {
 	assert.Equal("0.0.0.0", c.ReceiverHost)
 	assert.True(c.LogThrottling)
 	assert.True(c.OTLPReceiver.SpanNameAsResourceName)
-	assert.Equal(map[string]string{"a": "b", "c": "d"}, c.OTLPReceiver.SpanNameRemappings)
+	assert.Equal(map[string]string{"a": "b", "and:colons": "in:values", "c": "d", "with.dots": "in.side"}, c.OTLPReceiver.SpanNameRemappings)
 
 	noProxy := true
 	if _, ok := os.LookupEnv("NO_PROXY"); ok {
