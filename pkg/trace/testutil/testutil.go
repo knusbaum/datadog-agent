@@ -23,13 +23,13 @@ import (
 
 // FindTCPPort finds a free TCP port and returns it. If it fails, error will be non-nil.
 func FindTCPPort() (int, error) {
-	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
-		return 0, fmt.Errorf("resolve:%v", err)
+		return 0, fmt.Errorf("resolve: %v", err)
 	}
 	l, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		return 0, fmt.Errorf("listen:%v", err)
+		return 0, fmt.Errorf("listen: %v", err)
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port, nil

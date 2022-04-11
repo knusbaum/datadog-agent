@@ -183,7 +183,7 @@ func TestOTLPReceiver(t *testing.T) {
 		port := testutil.FreeTCPPort(t)
 		cfg := config.New()
 		cfg.OTLPReceiver = &config.OTLP{
-			BindHost: "127.0.0.1",
+			BindHost: "localhost",
 			GRPCPort: port,
 		}
 		o := NewOTLPReceiver(nil, cfg)
@@ -202,7 +202,7 @@ func TestOTLPReceiver(t *testing.T) {
 		port1, port2 := testutil.FreeTCPPort(t), testutil.FreeTCPPort(t)
 		cfg := config.New()
 		cfg.OTLPReceiver = &config.OTLP{
-			BindHost: "127.0.0.1",
+			BindHost: "localhost",
 			HTTPPort: port1,
 			GRPCPort: port2,
 		}
