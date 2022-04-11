@@ -222,12 +222,13 @@ func (o *OTLPReceiver) ReceiveResourceSpans(rspans pdata.ResourceSpans, header h
 	// each rspans is coming from a different resource and should be considered
 	// a separate payload; typically there is only one item in this slice
 	attr := rspans.Resource().Attributes()
-	hostname, _ := attributes.HostnameFromAttributes(attr)
 	rattr := make(map[string]string, attr.Len())
 	attr.Range(func(k string, v pdata.AttributeValue) bool {
 		rattr[k] = v.AsString()
 		return true
 	})
+	hostname, _ := attributes.HostnameFromAttributes(attr)
+	env := rattr[string(semconv.AttributeDeploymentEnvironment)]
 	lang := rattr[string(semconv.AttributeTelemetrySDKLanguage)]
 	if lang == "" {
 		lang = fastHeaderGet(header, headerLang)
@@ -256,9 +257,15 @@ func (o *OTLPReceiver) ReceiveResourceSpans(rspans pdata.ResourceSpans, header h
 			ddspan := o.convertSpan(rattr, lib, span)
 			if hostname == "" {
 				// if we didn't find a hostname at the resource level
+				// try and see if the span has a hostname set
 				if v := ddspan.Meta["_dd.hostname"]; v != "" {
-					// try and see if the span has a hostname set
 					hostname = v
+				}
+			}
+			if env == "" {
+				// no env at resource level, try the first span
+				if v := ddspan.Meta["env"]; v != "" {
+					env = v
 				}
 			}
 			tracesByID[traceID] = append(tracesByID[traceID], ddspan)
@@ -279,10 +286,10 @@ func (o *OTLPReceiver) ReceiveResourceSpans(rspans pdata.ResourceSpans, header h
 			Spans:    spans,
 		})
 	}
-	env := rattr[string(semconv.AttributeDeploymentEnvironment)]
+	if env == "" {
+		env = o.conf.DefaultEnv
+	}
 	if hostname == "" {
-		// if we didn't find a hostname anywhere: not at the resource level,
-		// not at the span level, use the config hostname
 		hostname = o.conf.Hostname
 	}
 	p.TracerPayload = &pb.TracerPayload{
@@ -407,6 +414,14 @@ func (o *OTLPReceiver) convertSpan(rattr map[string]string, lib pdata.Instrument
 				span.Resource = v.AsString()
 			case "span.type":
 				span.Type = v.AsString()
+			case "analytics.event":
+				if v, err := strconv.ParseBool(v.AsString()); err != nil {
+					if v {
+						span.Metrics[sampler.KeySamplingRateEventExtraction] = 1
+					} else {
+						span.Metrics[sampler.KeySamplingRateEventExtraction] = 0
+					}
+				}
 			default:
 				span.Meta[k] = v.AsString()
 			}
@@ -475,30 +490,29 @@ func (o *OTLPReceiver) convertSpan(rattr map[string]string, lib pdata.Instrument
 // resourceFromTags attempts to deduce a more accurate span resource from the given list of tags meta.
 // If this is not possible, it returns an empty string.
 func resourceFromTags(meta map[string]string) string {
-	var r string
 	if m := meta[string(semconv.AttributeHTTPMethod)]; m != "" {
 		// use the HTTP method + route (if available)
-		r = m
 		if route := meta[string(semconv.AttributeHTTPRoute)]; route != "" {
-			r += " " + route
+			return m + " " + route
 		} else if route := meta["grpc.path"]; route != "" {
-			r += " " + route
+			return m + " " + route
 		}
+		return m
 	} else if m := meta[string(semconv.AttributeMessagingOperation)]; m != "" {
 		// use the messaging operation
-		r = m
 		if dest := meta[string(semconv.AttributeMessagingDestination)]; dest != "" {
-			r += " " + dest
+			return m + " " + dest
 		}
+		return m
 	} else if m := meta[string(semconv.AttributeRPCMethod)]; m != "" {
 		// use the RPC method
-		r = m
 		if svc := meta[string(semconv.AttributeRPCService)]; svc != "" {
 			// ...and service if availabl
-			r += " " + svc
+			return m + " " + svc
 		}
+		return m
 	}
-	return r
+	return ""
 }
 
 // status2Error checks the given status and events and applies any potential error and messages
@@ -513,17 +527,16 @@ func status2Error(status pdata.SpanStatus, events pdata.SpanEventSlice, span *pb
 		if strings.ToLower(e.Name()) != "exception" {
 			continue
 		}
-		e.Attributes().Range(func(k string, v pdata.AttributeValue) bool {
-			switch k {
-			case string(semconv.AttributeExceptionMessage):
-				span.Meta["error.msg"] = v.AsString()
-			case string(semconv.AttributeExceptionType):
-				span.Meta["error.type"] = v.AsString()
-			case string(semconv.AttributeExceptionStacktrace):
-				span.Meta["error.stack"] = v.AsString()
-			}
-			return true
-		})
+		attrs := e.Attributes()
+		if v, ok := attrs.Get(semconv.AttributeExceptionMessage); ok {
+			span.Meta["error.msg"] = v.AsString()
+		}
+		if v, ok := attrs.Get(semconv.AttributeExceptionType); ok {
+			span.Meta["error.type"] = v.AsString()
+		}
+		if v, ok := attrs.Get(semconv.AttributeExceptionStacktrace); ok {
+			span.Meta["error.stack"] = v.AsString()
+		}
 	}
 	if _, ok := span.Meta["error.msg"]; !ok {
 		// no error message was extracted, find alternatives
