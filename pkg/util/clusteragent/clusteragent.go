@@ -6,21 +6,25 @@
 package clusteragent
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
-
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DataDog/datadog-agent/pkg/util/log"
 
 	"github.com/DataDog/datadog-agent/pkg/api/security"
-	"github.com/DataDog/datadog-agent/pkg/api/util"
 	apiv1 "github.com/DataDog/datadog-agent/pkg/clusteragent/api/v1"
 	"github.com/DataDog/datadog-agent/pkg/clusteragent/clusterchecks/types"
 	"github.com/DataDog/datadog-agent/pkg/config"
@@ -98,6 +102,68 @@ func GetClusterAgentClient() (DCAClientInterface, error) {
 	return globalClusterAgentClient, nil
 }
 
+var goroutineSpace = []byte("goroutine ")
+
+var littleBuf = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 64)
+		return &buf
+	},
+}
+
+func curGoroutineID() uint64 {
+	bp := littleBuf.Get().(*[]byte)
+	defer littleBuf.Put(bp)
+	b := *bp
+	b = b[:runtime.Stack(b, false)]
+	// Parse the 4707 out of "goroutine 4707 ["
+	b = bytes.TrimPrefix(b, goroutineSpace)
+	i := bytes.IndexByte(b, ' ')
+	if i < 0 {
+		panic(fmt.Sprintf("No space found in %q", b))
+	}
+	b = b[:i]
+	n, err := strconv.ParseUint(string(b), 10, 64)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse goroutine ID out of %q: %v", b, err))
+	}
+	return n
+}
+
+type LoggingRoundTriper struct {
+	tr *http.Transport
+}
+
+func (lt *LoggingRoundTriper) RoundTrip(req *http.Request) (*http.Response, error) {
+	goRoutineID := curGoroutineID()
+	log.Infof("##### [%d] RoundTrip Query: %s, %s", goRoutineID, req.Method, req.URL)
+	resp, err := lt.tr.RoundTrip(req)
+	log.Infof("##### [%d] RoundTrip Response: %s, %s, rc: %d, err: %v", goRoutineID, req.Method, req.URL, resp.StatusCode, err)
+	return resp, err
+}
+
+func buildDCAHttpClient() *http.Client {
+	// Using default Dialer (same as default Transport code)
+	dialer := net.Dialer{}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			goRoutineID := curGoroutineID()
+			log.Infof("##### [%d] Dialing to: %s/%s", goRoutineID, network, addr)
+			conn, err := dialer.DialContext(ctx, network, addr)
+			log.Infof("##### [%d] Dialing to: %s/%s FINISHED!, conn: %v, err: %v", goRoutineID, network, addr, conn, err)
+			return conn, err
+		},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		TLSHandshakeTimeout: 1 * time.Second,
+		MaxConnsPerHost:     1,
+		IdleConnTimeout:     5 * time.Minute,
+	}
+
+	return &http.Client{
+		Transport: tr,
+	}
+}
+
 func (c *DCAClient) init() error {
 	var err error
 
@@ -117,7 +183,7 @@ func (c *DCAClient) init() error {
 	c.clusterAgentAPIRequestHeaders.Set(RealIPHeader, podIP)
 
 	// TODO remove insecure
-	c.clusterAgentAPIClient = util.GetClient(false)
+	c.clusterAgentAPIClient = buildDCAHttpClient()
 	c.clusterAgentAPIClient.Timeout = 2 * time.Second
 
 	// Validate the cluster-agent client by checking the version
@@ -128,7 +194,7 @@ func (c *DCAClient) init() error {
 	log.Infof("Successfully connected to the Datadog Cluster Agent %s", c.ClusterAgentVersion.String())
 
 	// Clone the http client in a new client with built-in redirect handler
-	c.leaderClient = newLeaderClient(c.clusterAgentAPIClient, c.clusterAgentAPIEndpoint)
+	c.leaderClient = newLeaderClient(buildDCAHttpClient(), c.clusterAgentAPIEndpoint)
 
 	return nil
 }
